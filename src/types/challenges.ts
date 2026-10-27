@@ -16,7 +16,7 @@ export interface SpellingCase {
   id: string;
   caseNumber: number;
   title: string;
-  topic: 'l/n' | 's/x' | 'tr/ch' | 'd/gi/r' | 'dấu hỏi/dấu ngã';
+  topic: 'l/n' | 's/x' | 'tr/ch' | 'd/gi/r' | 'dấu hỏi/dấu ngã' | 'c/k' | 'v/d' | 'âm cuối' | string;
   passage: string;
   wrongWord: string;
   correctWord: string;
@@ -33,7 +33,7 @@ export interface VividWordChallenge {
   id: string;
   challengeNumber: number;
   title: string;
-  category: 'Âm thanh' | 'Màu sắc' | 'Dáng vẻ' | 'Ánh sáng' | 'Cảm xúc';
+  category: 'Âm thanh' | 'Màu sắc' | 'Dáng vẻ' | 'Ánh sáng' | 'Cảm xúc' | 'Thời tiết & Thiên nhiên' | string;
   prompt: string;
   sentenceContext: string;
   options: {

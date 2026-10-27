@@ -9,16 +9,22 @@ import {
   ChevronRight, 
   Trophy,
   Clock,
-  Volume2,
-  Eye,
-  Info
+  RotateCcw,
+  Shuffle,
+  Volume2
 } from 'lucide-react';
 import { VIVID_WORD_CHALLENGES } from '../../data/challengeData';
+import { 
+  getRandomVividWordsSession, 
+  getReplacementQuestion,
+  shuffleArray 
+} from '../../utils/challengeRandomizer';
 import { 
   getLocalChallengeProgress, 
   recordRoundOutcome 
 } from '../../utils/challengeStorage';
 import { UserProfile } from '../../types';
+import { VividWordChallenge } from '../../types/challenges';
 import confetti from 'canvas-confetti';
 
 interface VividWordsGameProps {
@@ -32,14 +38,24 @@ export const VividWordsGame: React.FC<VividWordsGameProps> = ({
   onBack,
   onScoreUpdated,
 }) => {
+  const [progress, setProgress] = useState(() => getLocalChallengeProgress(currentUser.id));
+
+  // Dynamic session challenges (6 challenges randomly picked from 24)
+  const [sessionChallenges, setSessionChallenges] = useState<VividWordChallenge[]>(() =>
+    getRandomVividWordsSession(6, progress.games['vivid-words']?.completedRoundIds || [])
+  );
   const [currentIdx, setCurrentIdx] = useState<number>(0);
-  const challenge = VIVID_WORD_CHALLENGES[currentIdx];
+  const [sessionCount, setSessionCount] = useState<number>(1);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const challenge = sessionChallenges[currentIdx] || sessionChallenges[0];
 
   const [selectedOptionId, setSelectedOptionId] = useState<string | null>(null);
+  const [shuffledOptions, setShuffledOptions] = useState<typeof challenge.options>([]);
   const [usedHint, setUsedHint] = useState<boolean>(false);
   const [showHintModal, setShowHintModal] = useState<boolean>(false);
 
-  // Optional Timer feature (off by default or user toggleable, zero stress)
+  // Optional Timer feature
   const [timerEnabled, setTimerEnabled] = useState<boolean>(false);
   const [timeLeft, setTimeLeft] = useState<number>(30);
 
@@ -49,25 +65,67 @@ export const VividWordsGame: React.FC<VividWordsGameProps> = ({
     isDuplicate?: boolean;
   }>({ status: 'idle' });
 
-  const [progress, setProgress] = useState(() => getLocalChallengeProgress(currentUser.id));
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3000);
+  };
 
-  // Reset per challenge
   useEffect(() => {
-    setSelectedOptionId(null);
-    setUsedHint(false);
-    setShowHintModal(false);
-    setEvaluationResult({ status: 'idle' });
-    setTimeLeft(30);
+    if (challenge) {
+      setSelectedOptionId(null);
+      setShuffledOptions(shuffleArray(challenge.options));
+      setUsedHint(false);
+      setShowHintModal(false);
+      setEvaluationResult({ status: 'idle' });
+      setTimeLeft(30);
+    }
   }, [currentIdx, challenge]);
 
-  // Optional countdown effect (only ticks if enabled and not solved)
+  // Optional countdown timer
   useEffect(() => {
-    if (!timerEnabled || evaluationResult.status === 'success' || timeLeft <= 0) return;
-    const interval = setInterval(() => {
-      setTimeLeft(prev => Math.max(0, prev - 1));
+    if (!timerEnabled || evaluationResult.status !== 'idle') return;
+
+    if (timeLeft <= 0) {
+      setEvaluationResult({
+        status: 'incorrect'
+      });
+      return;
+    }
+
+    const timer = setInterval(() => {
+      setTimeLeft(prev => prev - 1);
     }, 1000);
-    return () => clearInterval(interval);
-  }, [timerEnabled, evaluationResult.status, timeLeft]);
+
+    return () => clearInterval(timer);
+  }, [timerEnabled, timeLeft, evaluationResult.status]);
+
+  // Start fresh session with new batch of vivid word challenges
+  const handleStartNewSession = () => {
+    const nextCompleted = progress.games['vivid-words']?.completedRoundIds || [];
+    const newSession = getRandomVividWordsSession(6, nextCompleted);
+    setSessionChallenges(newSession);
+    setCurrentIdx(0);
+    setSessionCount(prev => prev + 1);
+    showToast('✨ Đã tạo lượt thách đấu mới với bộ câu hỏi từ ngữ phong phú!');
+  };
+
+  // Swap current challenge if student wants another one
+  const handleSwapCurrentChallenge = () => {
+    const activeIds = sessionChallenges.map(c => c.id);
+    const replacement = getReplacementQuestion(VIVID_WORD_CHALLENGES, activeIds);
+    if (!replacement) {
+      showToast('Em đang trải nghiệm trọn bộ ngân hàng từ ngữ!');
+      return;
+    }
+    const updated = [...sessionChallenges];
+    updated[currentIdx] = {
+      ...replacement,
+      challengeNumber: currentIdx + 1,
+      options: shuffleArray(replacement.options),
+    };
+    setSessionChallenges(updated);
+    showToast(`Đã đổi sang câu hỏi mới: "${replacement.title}"!`);
+  };
 
   const handleSelectOption = (optId: string) => {
     if (evaluationResult.status === 'success') return;
@@ -77,44 +135,35 @@ export const VividWordsGame: React.FC<VividWordsGameProps> = ({
     }
   };
 
-  const handleUseHint = () => {
-    setUsedHint(true);
-    setShowHintModal(true);
-  };
-
-  const handleSubmitChoice = () => {
+  const handleEvaluateChoice = () => {
     if (!selectedOptionId) return;
 
-    const chosenOption = challenge.options.find(o => o.id === selectedOptionId);
-    if (!chosenOption) return;
+    const chosen = shuffledOptions.find(o => o.id === selectedOptionId);
+    if (!chosen) return;
 
-    if (chosenOption.isBest) {
-      const outcome = recordRoundOutcome({
+    if (chosen.isBest) {
+      const res = recordRoundOutcome({
         userId: currentUser.id,
         gameId: 'vivid-words',
         roundId: challenge.id,
         isCorrect: true,
-        usedHint: usedHint
+        usedHint
       });
+
+      setProgress(res.progress);
+      onScoreUpdated();
 
       setEvaluationResult({
         status: 'success',
-        pointsEarned: outcome.pointsAwarded,
-        isDuplicate: outcome.isDuplicate
+        pointsEarned: res.pointsAwarded,
+        isDuplicate: res.isDuplicate
       });
 
-      setProgress(outcome.progress);
-      onScoreUpdated();
-
-      try {
-        confetti({
-          particleCount: 50,
-          spread: 60,
-          origin: { y: 0.6 }
-        });
-      } catch {
-        // safe
-      }
+      confetti({
+        particleCount: 90,
+        spread: 70,
+        origin: { y: 0.6 }
+      });
     } else {
       setEvaluationResult({
         status: 'incorrect'
@@ -123,286 +172,300 @@ export const VividWordsGame: React.FC<VividWordsGameProps> = ({
   };
 
   const handleNextChallenge = () => {
-    if (currentIdx < VIVID_WORD_CHALLENGES.length - 1) {
-      setCurrentIdx(currentIdx + 1);
+    if (currentIdx < sessionChallenges.length - 1) {
+      setCurrentIdx(prev => prev + 1);
     }
   };
 
-  const isChallengeDone = (id: string) => {
-    return progress.games['vivid-words'].completedRoundIds.includes(id);
+  // Render context with highlighted word
+  const renderContextSentence = () => {
+    const parts = challenge.sentenceContext.split('[...]');
+    const chosen = shuffledOptions.find(o => o.id === selectedOptionId);
+
+    return (
+      <p className="text-slate-800 text-base sm:text-lg leading-relaxed font-serif">
+        {parts[0]}
+        <span className={`inline-block px-3.5 py-1 mx-1 rounded-xl font-bold transition-all ${
+          evaluationResult.status === 'success'
+            ? 'bg-amber-100 text-amber-900 border-2 border-amber-500 font-sans'
+            : selectedOptionId
+            ? 'bg-orange-100 text-orange-900 border-2 border-orange-400 font-sans'
+            : 'bg-amber-100/70 text-amber-800 border-2 border-dashed border-amber-300 font-sans italic'
+        }`}>
+          {chosen ? chosen.word : '[... từ ngữ đắt giá ...]'}
+        </span>
+        {parts[1] || ''}
+      </p>
+    );
   };
 
-  const currentScore = progress.games['vivid-words'].scoresByRound[challenge.id] || 0;
-
   return (
-    <div className="max-w-4xl mx-auto space-y-6 pb-12 animate-in fade-in duration-200">
+    <div className="space-y-6 max-w-4xl mx-auto pb-12 animate-in fade-in duration-200">
+      {/* Toast Alert */}
+      {toastMessage && (
+        <div className="fixed top-20 right-6 z-50 p-4 bg-amber-600 text-white rounded-2xl shadow-xl flex items-center gap-2 text-sm font-bold animate-in slide-in-from-top-4 duration-200">
+          <Sparkles className="w-5 h-5 text-amber-200 animate-spin" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
+
       {/* Top Header Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-4 bg-white p-4 sm:p-5 rounded-3xl border border-amber-200/80 shadow-xs">
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-4 sm:p-5 rounded-3xl border border-amber-200 shadow-xs">
         <div className="flex items-center gap-3">
           <button
             onClick={onBack}
-            className="p-2.5 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors cursor-pointer flex items-center gap-1.5 text-xs font-bold"
+            className="p-2.5 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors cursor-pointer"
+            title="Quay lại danh sách thử thách"
           >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Thử thách</span>
+            <ArrowLeft className="w-5 h-5" />
           </button>
           <div>
             <div className="flex items-center gap-2">
               <span className="text-xl">👑</span>
-              <h1 className="font-heading font-extrabold text-lg sm:text-xl text-slate-800">
+              <h2 className="font-heading font-extrabold text-base sm:text-lg text-slate-800">
                 Vua Từ Láy & Từ Gợi Cảm
-              </h1>
-              <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-bold border border-amber-300">
-                Thách đấu {challenge.challengeNumber}/{VIVID_WORD_CHALLENGES.length}
+              </h2>
+              <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
+                Lượt #{sessionCount}
               </span>
             </div>
-            <p className="text-xs text-slate-500 font-medium">
-              Chủ đề: <strong className="text-amber-700">{challenge.category}</strong> • {challenge.title}
+            <p className="text-xs text-slate-500 hidden sm:block">
+              Lựa chọn từ ngữ gợi tả gợi cảm tinh tế nhất để nâng tầm câu văn
             </p>
           </div>
         </div>
 
-        {/* Global Points & Optional Timer Toggle */}
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2 bg-amber-50 px-3 py-1.5 rounded-2xl border border-amber-200">
-            <button
-              onClick={() => setTimerEnabled(!timerEnabled)}
-              className="text-xs font-semibold text-slate-700 hover:text-amber-700 flex items-center gap-1.5 cursor-pointer"
-              title="Bật/Tắt đồng hồ thử thách thư giãn"
-            >
-              <Clock className="w-3.5 h-3.5 text-amber-600" />
-              <span>{timerEnabled ? `${timeLeft}s` : 'Bật đếm giờ'}</span>
-            </button>
-          </div>
+        {/* Action buttons & Counter */}
+        <div className="flex items-center gap-2">
+          {/* Optional Timer Toggle */}
+          <button
+            onClick={() => setTimerEnabled(!timerEnabled)}
+            className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
+              timerEnabled 
+                ? 'bg-amber-500 text-white border-amber-600 shadow-xs' 
+                : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+            }`}
+            title="Bật/Tắt đồng hồ thử thách 30 giây (không bắt buộc)"
+          >
+            <Clock className="w-3.5 h-3.5" />
+            <span>{timerEnabled ? `${timeLeft}s` : 'Đồng hồ'}</span>
+          </button>
 
-          <div className="text-right">
-            <span className="text-[11px] text-slate-500 block font-medium">Điểm vương miện</span>
-            <span className="text-base font-extrabold text-amber-600">
-              {progress.games['vivid-words'].totalPoints} / 60 điểm
+          <button
+            onClick={handleSwapCurrentChallenge}
+            className="px-3 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 hover:text-amber-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+            title="Đổi sang câu hỏi từ láy khác"
+          >
+            <Shuffle className="w-3.5 h-3.5 text-amber-600" />
+            <span className="hidden sm:inline">Đổi câu khác</span>
+          </button>
+
+          <button
+            onClick={handleStartNewSession}
+            className="px-3 py-1.5 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+            title="Tạo lượt thách đấu mới với bộ câu hỏi ngẫu nhiên"
+          >
+            <RotateCcw className="w-3.5 h-3.5 text-amber-600" />
+            <span>Lượt mới</span>
+          </button>
+
+          <div className="px-3.5 py-1.5 rounded-2xl bg-amber-50 border border-amber-200 flex items-center gap-1.5">
+            <span className="text-xs font-bold text-amber-800">
+              Câu {currentIdx + 1}/{sessionChallenges.length}
             </span>
-          </div>
-          <div className="w-10 h-10 rounded-2xl bg-amber-100 border border-amber-300 flex items-center justify-center text-amber-700 font-bold">
-            <Crown className="w-5 h-5" />
           </div>
         </div>
       </div>
 
-      {/* Challenges Selector Pills */}
-      <div className="bg-amber-50/60 p-2.5 sm:p-3 rounded-2xl border border-amber-200 flex items-center gap-2 overflow-x-auto">
-        <span className="text-xs font-bold text-amber-900 shrink-0 ml-1">
-          Các thách đấu:
-        </span>
-        {VIVID_WORD_CHALLENGES.map((ch, idx) => {
+      {/* Progress Pills */}
+      <div className="grid grid-cols-6 gap-2">
+        {sessionChallenges.map((c, idx) => {
+          const isDone = progress.games['vivid-words']?.completedRoundIds.includes(c.id);
           const isCurrent = idx === currentIdx;
-          const completed = isChallengeDone(ch.id);
-          const score = progress.games['vivid-words'].scoresByRound[ch.id] || 0;
-
           return (
-            <button
-              key={ch.id}
-              onClick={() => setCurrentIdx(idx)}
-              className={`px-3 py-1.5 rounded-xl font-bold text-xs transition-all flex items-center gap-1.5 shrink-0 cursor-pointer ${
-                isCurrent
-                  ? 'bg-amber-500 text-white shadow-md shadow-amber-500/25 scale-105'
-                  : completed
-                  ? 'bg-amber-100 text-amber-900 hover:bg-amber-200 border border-amber-300'
-                  : 'bg-white text-slate-600 hover:bg-amber-50 border border-slate-200'
+            <div
+              key={c.id}
+              className={`h-2 rounded-full transition-all duration-300 ${
+                isCurrent 
+                  ? 'bg-amber-500 ring-2 ring-amber-300 ring-offset-1' 
+                  : isDone 
+                  ? 'bg-amber-400' 
+                  : 'bg-slate-200'
               }`}
-            >
-              <span>Thách đấu {ch.challengeNumber}</span>
-              {completed && (
-                <span className="text-[10px] font-extrabold bg-amber-700 text-amber-100 px-1 rounded">
-                  {score}đ
-                </span>
-              )}
-            </button>
+            />
           );
         })}
       </div>
 
-      {/* Main Challenge Arena */}
-      <div className="bg-white rounded-3xl border border-amber-200 shadow-sm p-6 sm:p-7 space-y-6">
-        {/* Prompt Header */}
-        <div className="flex items-start justify-between gap-4 pb-4 border-b border-amber-100">
-          <div>
-            <span className="text-[11px] font-bold uppercase tracking-wider text-amber-700 bg-amber-100 px-2.5 py-1 rounded-md">
-              Thách đấu #{challenge.challengeNumber} • Miêu tả {challenge.category}
-            </span>
-            <h2 className="text-base sm:text-lg font-bold text-slate-800 mt-2">
-              {challenge.prompt}
-            </h2>
-          </div>
-
-          {currentScore > 0 && (
-            <div className="shrink-0 bg-amber-50 border border-amber-300 px-3 py-1.5 rounded-xl text-center">
-              <span className="text-[10px] font-bold text-amber-800 block">Đã ghi điểm</span>
-              <span className="text-sm font-extrabold text-amber-700">+{currentScore} điểm</span>
+      {/* Main Challenge Card */}
+      <div className="bg-white rounded-3xl border border-amber-200 p-6 sm:p-8 shadow-xs space-y-6">
+        {/* Category Header */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-amber-800 bg-amber-100 px-2.5 py-0.5 rounded-full">
+                Sắc thái: {challenge.category}
+              </span>
+              <span className="text-xs text-slate-400">• Câu #{challenge.id}</span>
             </div>
-          )}
-        </div>
-
-        {/* Sentence Context with Gap */}
-        <div className="p-5 sm:p-6 rounded-2xl bg-gradient-to-r from-amber-50/70 via-orange-50/50 to-amber-50/70 border-2 border-amber-300/80 shadow-2xs space-y-2">
-          <div className="text-xs font-bold text-amber-900 flex items-center gap-1.5">
-            <Sparkles className="w-4 h-4 text-amber-600" />
-            <span>Ngữ cảnh câu văn cần điền từ:</span>
+            <h3 className="font-heading font-bold text-lg text-slate-800">
+              {challenge.title}
+            </h3>
           </div>
 
-          <p className="text-base sm:text-lg text-slate-800 leading-relaxed font-serif">
-            {challenge.sentenceContext.split('[...]')[0]}
-            <span className="inline-block px-3 py-1 rounded-xl bg-white border-2 border-dashed border-amber-400 text-amber-900 font-bold mx-1 shadow-inner">
-              {selectedOptionId 
-                ? challenge.options.find(o => o.id === selectedOptionId)?.word 
-                : '... ? ...'}
-            </span>
-            {challenge.sentenceContext.split('[...]')[1]}
-          </p>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                setShowHintModal(true);
+                setUsedHint(true);
+              }}
+              className="px-3 py-1.5 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <HelpCircle className="w-4 h-4 text-amber-600" />
+              <span>Gợi mở từ ngữ</span>
+            </button>
+          </div>
         </div>
 
-        {/* 4 Choices Grid */}
+        {/* Prompt Question */}
+        <div className="p-4 rounded-2xl bg-amber-50/60 border border-amber-200/80 text-xs sm:text-sm text-slate-700 font-medium">
+          {challenge.prompt}
+        </div>
+
+        {/* Sentence In Context */}
+        <div className="p-6 rounded-2xl bg-[#fffdf9] border-2 border-amber-200/90 shadow-xs">
+          {renderContextSentence()}
+        </div>
+
+        {/* Option Selection with Detailed Nuances */}
         <div className="space-y-3">
-          <h3 className="text-xs font-bold text-slate-700">
-            Chọn từ ngữ đắt giá nhất trong 4 phương án sau:
-          </h3>
+          <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+            Chạm để chọn từ ngữ phù hợp nhất:
+          </label>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-            {challenge.options.map((option, idx) => {
-              const isSelected = selectedOptionId === option.id;
-              const isSuccess = evaluationResult.status === 'success';
-
-              let cardStyle = 'bg-white text-slate-800 border-slate-200 hover:border-amber-400 hover:bg-amber-50/40';
-              if (isSelected) {
-                cardStyle = 'bg-amber-50 text-amber-950 border-2 border-amber-500 shadow-sm';
-              }
-              if (isSuccess && option.isBest) {
-                cardStyle = 'bg-emerald-50 text-emerald-950 border-2 border-emerald-500 shadow-sm';
-              }
-
-              const letters = ['A', 'B', 'C', 'D'];
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+            {shuffledOptions.map((opt) => {
+              const isSelected = selectedOptionId === opt.id;
+              const isSuccessBest = evaluationResult.status === 'success' && opt.isBest;
 
               return (
                 <button
-                  key={option.id}
-                  onClick={() => handleSelectOption(option.id)}
-                  disabled={isSuccess}
-                  className={`p-4 rounded-2xl border text-left font-bold transition-all flex flex-col justify-between cursor-pointer space-y-2 ${cardStyle}`}
+                  key={opt.id}
+                  onClick={() => handleSelectOption(opt.id)}
+                  className={`p-4 rounded-2xl border-2 text-left transition-all cursor-pointer flex flex-col justify-between gap-2.5 shadow-xs active:scale-98 ${
+                    isSuccessBest
+                      ? 'bg-emerald-50 border-emerald-500 ring-2 ring-emerald-300'
+                      : isSelected
+                      ? 'bg-amber-50 border-amber-500 ring-2 ring-amber-300'
+                      : 'bg-white border-slate-200 hover:border-amber-300 hover:bg-amber-50/30'
+                  }`}
                 >
-                  <div className="flex items-center justify-between w-full">
-                    <div className="flex items-center gap-2.5">
-                      <span className={`w-7 h-7 rounded-xl flex items-center justify-center text-xs font-bold ${
-                        isSelected ? 'bg-amber-500 text-white' : 'bg-slate-100 text-slate-600'
-                      }`}>
-                        {letters[idx]}
-                      </span>
-                      <span className="text-base sm:text-lg">{option.word}</span>
-                    </div>
-
-                    {isSuccess && option.isBest && (
-                      <span className="text-xs font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-md">
-                        Từ đắt giá nhất
-                      </span>
+                  <div className="flex items-center justify-between">
+                    <span className="font-heading font-extrabold text-base text-slate-900">
+                      {opt.word}
+                    </span>
+                    {isSuccessBest ? (
+                      <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                    ) : isSelected ? (
+                      <div className="w-3.5 h-3.5 rounded-full bg-amber-600" />
+                    ) : (
+                      <div className="w-3.5 h-3.5 rounded-full border border-slate-300" />
                     )}
                   </div>
-
-                  {/* Nuance preview on solved */}
-                  {isSuccess && (
-                    <p className="text-[11px] text-slate-600 font-normal leading-relaxed border-t border-slate-200/60 pt-1.5">
-                      {option.nuance}
-                    </p>
-                  )}
+                  <p className="text-[11px] text-slate-500 leading-relaxed font-normal">
+                    {opt.nuance}
+                  </p>
                 </button>
               );
             })}
           </div>
         </div>
 
-        {/* Detailed Feedback & Semantic Nuance on Success */}
+        {/* Evaluation Banner */}
         {evaluationResult.status === 'success' && (
-          <div className="p-5 rounded-2xl bg-amber-50 border border-amber-300 space-y-3 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-amber-500 text-white flex items-center justify-center font-bold text-xl shrink-0 shadow-md">
-                👑
-              </div>
-              <div>
-                <h4 className="font-heading font-extrabold text-base text-amber-950">
-                  Xứng danh Vua Từ Ngữ! Lựa chọn hoàn hảo!
-                </h4>
-                <p className="text-xs font-semibold text-amber-700">
-                  {evaluationResult.pointsEarned! > 0
-                    ? `+${evaluationResult.pointsEarned} điểm tích lũy vào kho báu!`
-                    : evaluationResult.isDuplicate
-                    ? 'Em đã vượt qua thách đấu này từ trước!'
-                    : 'Tuyệt vời!'}
-                </p>
-              </div>
-            </div>
-
-            <div className="text-xs text-slate-700 leading-relaxed bg-white/90 p-4 rounded-xl border border-amber-200 space-y-2">
-              <p className="font-bold text-amber-950 flex items-center gap-1.5">
-                <Info className="w-4 h-4 text-amber-600" />
-                <span>Nét đẹp văn học & Sắc thái biểu cảm của từ:</span>
-              </p>
-              <p>{challenge.explanation}</p>
-              {challenge.openObservationTip && (
-                <div className="p-2.5 rounded-lg bg-amber-100/70 border border-amber-200 text-amber-900 font-medium">
-                  🌾 <strong>Mở rộng góc quan sát:</strong> {challenge.openObservationTip}
+          <div className="p-5 rounded-2xl bg-emerald-50 border border-emerald-200 space-y-3 animate-in zoom-in-95 duration-200">
+            <div className="flex items-start gap-3">
+              <Crown className="w-6 h-6 text-amber-500 shrink-0 mt-0.5 fill-amber-500" />
+              <div className="space-y-1.5">
+                <div className="font-bold text-sm text-emerald-900 flex items-center gap-2">
+                  <span>Tuyệt phẩm dùng từ! Em có con mắt quan sát rất tinh tế.</span>
+                  {evaluationResult.pointsEarned ? (
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-200 text-emerald-900 text-xs font-extrabold">
+                      +{evaluationResult.pointsEarned} điểm
+                    </span>
+                  ) : null}
                 </div>
-              )}
+                <p className="text-xs text-slate-700 leading-relaxed">
+                  {challenge.explanation}
+                </p>
+                {challenge.openObservationTip && (
+                  <div className="text-[11px] text-amber-900 bg-amber-100/80 p-2.5 rounded-xl font-medium mt-2">
+                    💡 <strong>Bí quyết người viết văn:</strong> {challenge.openObservationTip}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
 
         {evaluationResult.status === 'incorrect' && (
-          <div className="p-4 rounded-2xl bg-rose-50 border border-rose-300 flex items-start gap-3 animate-in fade-in duration-150">
-            <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
-            <div className="text-xs text-rose-950 space-y-1">
-              <p className="font-bold text-rose-900">Chưa phải từ đắt giá nhất cho ngữ cảnh này:</p>
-              <p>Mỗi từ ngữ trong Tiếng Việt đều mang một sắc thái riêng. Em hãy thử đọc lại câu văn và chọn từ ngữ giúp người đọc hình dung rõ nét nhất nhé!</p>
+          <div className="p-4 rounded-2xl bg-red-50 border border-red-200 flex items-start gap-3 animate-in shake duration-200">
+            <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+            <div className="text-xs text-red-700 space-y-1">
+              <p className="font-bold">Từ này chưa thật đắt giá trong ngữ cảnh bài văn!</p>
+              <p className="text-red-600">
+                Hãy đọc kỹ phần diễn giải ý nghĩa bên dưới mỗi từ để tìm ra từ ngữ gợi cảm nhất nhé.
+              </p>
             </div>
           </div>
         )}
 
-        {/* Action Controls */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-          <button
-            onClick={handleUseHint}
-            className={`px-4 py-2.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
-              usedHint
-                ? 'bg-amber-100 text-amber-900 border-amber-300'
-                : 'bg-white hover:bg-amber-50 text-amber-800 border-amber-300'
-            }`}
-          >
-            <HelpCircle className="w-4 h-4 text-amber-600" />
-            <span>{usedHint ? 'Đã xem gợi ý (Tối đa 5đ)' : 'Gợi ý sắc thái từ'}</span>
-          </button>
+        {/* Footer Actions */}
+        <div className="flex items-center justify-between pt-4 border-t border-slate-100 flex-wrap gap-3">
+          <div className="text-xs text-slate-500">
+            {usedHint ? (
+              <span className="text-amber-600 font-semibold">Đã dùng gợi mở (tối đa 5 điểm)</span>
+            ) : (
+              <span>Chọn chuẩn xác: <strong>+10 điểm</strong></span>
+            )}
+          </div>
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2">
             {evaluationResult.status !== 'success' ? (
               <button
-                onClick={handleSubmitChoice}
+                onClick={handleEvaluateChoice}
                 disabled={!selectedOptionId}
                 className="px-6 py-2.5 rounded-2xl bg-amber-500 hover:bg-amber-600 disabled:bg-slate-300 text-white font-bold text-sm shadow-md hover:shadow-lg transition-all cursor-pointer flex items-center gap-2"
               >
-                <CheckCircle2 className="w-4 h-4" />
-                <span>Khẳng định lựa chọn</span>
+                <Crown className="w-4 h-4" />
+                <span>Chọn từ ngữ này</span>
               </button>
             ) : (
-              currentIdx < VIVID_WORD_CHALLENGES.length - 1 ? (
+              currentIdx < sessionChallenges.length - 1 ? (
                 <button
                   onClick={handleNextChallenge}
                   className="px-6 py-2.5 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-bold text-sm shadow-md hover:shadow-lg transition-all cursor-pointer flex items-center gap-2"
                 >
-                  <span>Qua Thách đấu {challenge.challengeNumber + 1}</span>
+                  <span>Sang Thách đấu {currentIdx + 2}</span>
                   <ChevronRight className="w-4 h-4" />
                 </button>
               ) : (
-                <button
-                  onClick={onBack}
-                  className="px-6 py-2.5 rounded-2xl bg-amber-500 hover:bg-amber-600 text-white font-bold text-sm shadow-md cursor-pointer flex items-center gap-2"
-                >
-                  <Trophy className="w-4 h-4" />
-                  <span>Hoàn thành xuất sắc 6 Thách đấu!</span>
-                </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={handleStartNewSession}
+                    className="px-5 py-2.5 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-bold text-sm shadow-md hover:shadow-lg transition-all cursor-pointer flex items-center gap-2"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    <span>Thách đấu lượt mới với câu hỏi khác</span>
+                  </button>
+                  <button
+                    onClick={onBack}
+                    className="px-5 py-2.5 rounded-2xl bg-amber-500 hover:bg-amber-600 text-white font-bold text-sm shadow-md cursor-pointer flex items-center gap-2"
+                  >
+                    <Trophy className="w-4 h-4" />
+                    <span>Hoàn thành xuất sắc!</span>
+                  </button>
+                </div>
               )
             )}
           </div>
@@ -415,20 +478,18 @@ export const VividWordsGame: React.FC<VividWordsGameProps> = ({
           <div className="bg-white rounded-3xl max-w-md w-full p-6 border border-amber-200 shadow-xl space-y-4 animate-in zoom-in-95 duration-150">
             <div className="flex items-center gap-3 text-amber-700">
               <div className="w-10 h-10 rounded-2xl bg-amber-100 flex items-center justify-center text-xl">
-                👑
+                💡
               </div>
               <h3 className="font-heading font-extrabold text-base text-slate-800">
-                Gợi ý Sắc thái Từ ngữ
+                Gợi mở sắc thái từ ngữ
               </h3>
             </div>
 
             <div className="p-4 rounded-2xl bg-amber-50/70 border border-amber-200 text-xs text-slate-700 leading-relaxed space-y-2">
-              <p className="font-bold text-amber-950">Mẹo tư duy từ vựng:</p>
-              <p>
-                Em hãy chú ý: {challenge.category === 'Âm thanh' ? 'Mưa to hay mưa nhỏ? Mưa xối xả thì âm thanh phải vang và dồn dập.' : challenge.category === 'Màu sắc' ? 'Cánh đồng ngày mùa là màu của no ấm, được mùa bội thu.' : 'Hãy nhắm mắt lại và tưởng tượng hình ảnh chân thật nhất trong đầu em.'}
-              </p>
+              <p className="font-bold text-amber-900">Mẹo chọn từ:</p>
+              <p>{challenge.openObservationTip || challenge.explanation}</p>
               <p className="text-amber-800 italic pt-1 border-t border-amber-200">
-                Lưu ý: Sử dụng gợi ý sẽ nhận tối đa 5 điểm cho thách đấu này.
+                Lưu ý: Khi sử dụng gợi ý, điểm tối đa cho câu này là 5 điểm.
               </p>
             </div>
 
@@ -437,7 +498,7 @@ export const VividWordsGame: React.FC<VividWordsGameProps> = ({
                 onClick={() => setShowHintModal(false)}
                 className="px-5 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs cursor-pointer transition-colors"
               >
-                Em đã rõ, để em chọn!
+                Đã hiểu, em chọn lại!
               </button>
             </div>
           </div>

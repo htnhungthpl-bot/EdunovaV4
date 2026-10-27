@@ -212,9 +212,16 @@ async function syncWithBackend(progress: ChallengeUserProgress) {
 // Sentence Smith Rule-Based Evaluation Engine (Anti-AI slop, transparent pedagogical criteria)
 export interface SentenceSmithEvaluation {
   passed: boolean;
+  isSuccess: boolean;
   score: number; // 0, 5, or 10
+  feedback: string;
   feedbackPraise: string;
   feedbackImprovements: string[];
+  criteriaPassed: {
+    hasExpansion: boolean;
+    hasVividWord: boolean;
+    hasFigurative: boolean;
+  };
   detectedFeatures: {
     hasFullGrammar: boolean;
     hasSensoryDetail: boolean;
@@ -225,10 +232,26 @@ export interface SentenceSmithEvaluation {
 }
 
 export function evaluateSentenceSmith(
-  levelNumber: number,
-  inputSentence: string
+  levelOrInput: number | string | any,
+  inputOrLevel?: string | number | any
 ): SentenceSmithEvaluation {
-  const text = inputSentence.trim();
+  let levelNumber = 1;
+  let text = "";
+
+  if (typeof levelOrInput === "string") {
+    text = levelOrInput.trim();
+    if (typeof inputOrLevel === "number") {
+      levelNumber = inputOrLevel;
+    } else if (inputOrLevel && typeof inputOrLevel === "object" && typeof inputOrLevel.levelNumber === "number") {
+      levelNumber = inputOrLevel.levelNumber;
+    }
+  } else if (typeof levelOrInput === "number") {
+    levelNumber = levelOrInput;
+    text = (typeof inputOrLevel === "string" ? inputOrLevel : "").trim();
+  } else if (levelOrInput && typeof levelOrInput === "object" && typeof levelOrInput.levelNumber === "number") {
+    levelNumber = levelOrInput.levelNumber;
+    text = (typeof inputOrLevel === "string" ? inputOrLevel : "").trim();
+  }
   const lower = text.toLowerCase();
   const words = text.split(/\s+/).filter(Boolean);
 
@@ -244,12 +267,19 @@ export function evaluateSentenceSmith(
   if (words.length < 5) {
     return {
       passed: false,
+      isSuccess: false,
       score: 0,
+      feedback: 'Câu của em còn hơi ngắn. Em hãy mở rộng thêm từ ngữ để câu văn rõ ràng, sinh động hơn nhé!',
       feedbackPraise: 'Em đã bắt đầu viết thử!',
       feedbackImprovements: [
         'Câu của em còn hơi ngắn. Em hãy mở rộng thêm từ ngữ để câu văn rõ ràng, sinh động hơn nhé!',
         ...improvements
       ],
+      criteriaPassed: {
+        hasExpansion: false,
+        hasVividWord: false,
+        hasFigurative: false
+      },
       detectedFeatures: {
         hasFullGrammar: false,
         hasSensoryDetail: false,
@@ -339,11 +369,21 @@ export function evaluateSentenceSmith(
     }
   }
 
+  const criteriaPassed = {
+    hasExpansion: words.length >= 8,
+    hasVividWord,
+    hasFigurative: hasFigurativeDevice
+  };
+  const feedback = passed ? praise : (improvements[0] || "Em hãy bổ sung thêm từ ngữ sinh động nhé!");
+
   return {
     passed,
+    isSuccess: passed,
     score,
+    feedback,
     feedbackPraise: praise,
     feedbackImprovements: improvements,
+    criteriaPassed,
     detectedFeatures: {
       hasFullGrammar: words.length >= 6,
       hasSensoryDetail,

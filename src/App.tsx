@@ -209,6 +209,10 @@ export default function App() {
                 setActiveTab('writing');
                 window.scrollTo({ top: 0, behavior: 'smooth' });
               }}
+              onNavigateToChallenges={() => {
+                setActiveTab('challenges');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
             />
           )}
 

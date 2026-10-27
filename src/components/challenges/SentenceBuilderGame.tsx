@@ -9,14 +9,20 @@ import {
   ChevronRight, 
   Trophy,
   Layers,
-  BookOpen
+  Shuffle
 } from 'lucide-react';
 import { SENTENCE_BUILDER_ROUNDS } from '../../data/challengeData';
+import { 
+  getRandomSentenceBuilderSession, 
+  getReplacementQuestion,
+  shuffleArray 
+} from '../../utils/challengeRandomizer';
 import { 
   getLocalChallengeProgress, 
   recordRoundOutcome 
 } from '../../utils/challengeStorage';
 import { UserProfile } from '../../types';
+import { SentenceBuilderRound } from '../../types/challenges';
 import confetti from 'canvas-confetti';
 
 interface SentenceBuilderGameProps {
@@ -30,8 +36,18 @@ export const SentenceBuilderGame: React.FC<SentenceBuilderGameProps> = ({
   onBack,
   onScoreUpdated,
 }) => {
+  // Load progress
+  const [progress, setProgress] = useState(() => getLocalChallengeProgress(currentUser.id));
+
+  // Dynamic session rounds (6 randomly sampled rounds per session from 24-round pool)
+  const [sessionRounds, setSessionRounds] = useState<SentenceBuilderRound[]>(() => 
+    getRandomSentenceBuilderSession(6, progress.games['sentence-builder']?.completedRoundIds || [])
+  );
   const [currentRoundIdx, setCurrentRoundIdx] = useState<number>(0);
-  const round = SENTENCE_BUILDER_ROUNDS[currentRoundIdx];
+  const [sessionCount, setSessionCount] = useState<number>(1);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const round = sessionRounds[currentRoundIdx] || sessionRounds[0];
 
   // Selected pieces in order placed by student
   const [placedPieces, setPlacedPieces] = useState<string[]>([]);
@@ -48,18 +64,22 @@ export const SentenceBuilderGame: React.FC<SentenceBuilderGameProps> = ({
     isDuplicate?: boolean;
   }>({ status: 'idle' });
 
-  // Load progress
-  const [progress, setProgress] = useState(() => getLocalChallengeProgress(currentUser.id));
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3000);
+  };
 
   // Initialize round pieces
   useEffect(() => {
-    // Shuffle pieces for fair play
-    const shuffled = [...round.pieces].sort(() => Math.random() - 0.5);
-    setAvailablePieces(shuffled);
-    setPlacedPieces([]);
-    setUsedHint(false);
-    setShowHintModal(false);
-    setEvaluationResult({ status: 'idle' });
+    if (round) {
+      // Shuffle pieces for fair play
+      const shuffled = shuffleArray(round.pieces);
+      setAvailablePieces(shuffled);
+      setPlacedPieces([]);
+      setUsedHint(false);
+      setShowHintModal(false);
+      setEvaluationResult({ status: 'idle' });
+    }
   }, [currentRoundIdx, round]);
 
   const handlePlacePiece = (piece: string, indexInAvailable: number) => {
@@ -85,241 +105,281 @@ export const SentenceBuilderGame: React.FC<SentenceBuilderGameProps> = ({
   };
 
   const handleResetPieces = () => {
-    const shuffled = [...round.pieces].sort(() => Math.random() - 0.5);
-    setAvailablePieces(shuffled);
-    setPlacedPieces([]);
-    setEvaluationResult({ status: 'idle' });
+    if (round) {
+      const shuffled = shuffleArray(round.pieces);
+      setAvailablePieces(shuffled);
+      setPlacedPieces([]);
+      setEvaluationResult({ status: 'idle' });
+    }
   };
 
-  const handleUseHint = () => {
-    setUsedHint(true);
-    setShowHintModal(true);
+  // Start a fresh new session with different questions
+  const handleStartNewSession = () => {
+    const nextCompleted = progress.games['sentence-builder']?.completedRoundIds || [];
+    const newSession = getRandomSentenceBuilderSession(6, nextCompleted);
+    setSessionRounds(newSession);
+    setCurrentRoundIdx(0);
+    setSessionCount(prev => prev + 1);
+    showToast('✨ Đã tạo lượt chơi mới với bộ câu hỏi hoàn toàn khác!');
+  };
+
+  // Swap current question if student wants a different one right now
+  const handleSwapCurrentQuestion = () => {
+    const currentActiveIds = sessionRounds.map(r => r.id);
+    const replacement = getReplacementQuestion(SENTENCE_BUILDER_ROUNDS, currentActiveIds);
+    if (!replacement) {
+      showToast('Em đang trải nghiệm kho câu hỏi phong phú nhất!');
+      return;
+    }
+    const updated = [...sessionRounds];
+    updated[currentRoundIdx] = {
+      ...replacement,
+      roundNumber: currentRoundIdx + 1,
+      pieces: shuffleArray(replacement.pieces),
+    };
+    setSessionRounds(updated);
+    showToast(`Đã đổi sang câu hỏi mới: "${replacement.title}"!`);
   };
 
   const handleCheckSentence = () => {
     if (placedPieces.length === 0) return;
 
-    const assembledString = placedPieces.join(' ').replace(/\s+([,.:!?])/g, '$1').trim();
-    
-    // Normalization check against valid patterns
-    const normalize = (s: string) => s.toLowerCase().replace(/[,.:!?]/g, '').replace(/\s+/g, ' ').trim();
-    const assembledNormalized = normalize(assembledString);
+    // Join pieces with a single space
+    const studentSentence = placedPieces.join(' ').replace(/\s+/g, ' ').trim();
 
-    const isMatch = round.validSentences.some(valid => {
-      return normalize(valid) === assembledNormalized;
+    // Check against valid variations
+    const isCorrect = round.validSentences.some(valid => {
+      const cleanValid = valid.replace(/\s+/g, ' ').trim().toLowerCase();
+      const cleanStudent = studentSentence.replace(/\s+/g, ' ').trim().toLowerCase();
+      // Allow with or without trailing dot
+      return cleanStudent === cleanValid || cleanStudent + '.' === cleanValid || cleanStudent === cleanValid + '.';
     });
 
-    if (isMatch) {
-      // Record score
-      const result = recordRoundOutcome({
+    if (isCorrect) {
+      // Record outcome
+      const res = recordRoundOutcome({
         userId: currentUser.id,
         gameId: 'sentence-builder',
         roundId: round.id,
         isCorrect: true,
-        usedHint: usedHint
+        usedHint
       });
+
+      setProgress(res.progress);
+      onScoreUpdated();
 
       setEvaluationResult({
         status: 'success',
-        pointsEarned: result.pointsAwarded,
-        isDuplicate: result.isDuplicate,
-        message: round.explanation
+        message: 'Hoàn hảo! Em đã sắp xếp các vế câu rất chuẩn mực và giàu cảm xúc.',
+        pointsEarned: res.pointsAwarded,
+        isDuplicate: res.isDuplicate
       });
 
-      // Update state
-      setProgress(result.progress);
-      onScoreUpdated();
-
-      try {
-        confetti({
-          particleCount: 50,
-          spread: 60,
-          origin: { y: 0.6 }
-        });
-      } catch {
-        // safe
-      }
+      confetti({
+        particleCount: 80,
+        spread: 60,
+        origin: { y: 0.6 }
+      });
     } else {
       setEvaluationResult({
         status: 'incorrect',
-        message: 'Trật tự các mảnh câu chưa thật hợp lý hoặc chưa rõ nghĩa. Em hãy thử suy nghĩ lại hoặc bấm nút "Gợi ý" để nhận trợ giúp nhé!'
+        message: 'Thứ tự các vế câu chưa thật hợp lý. Em hãy thử suy nghĩ lại hoặc bấm "Xem gợi ý" nhé!'
       });
     }
   };
 
   const handleNextRound = () => {
-    if (currentRoundIdx < SENTENCE_BUILDER_ROUNDS.length - 1) {
-      setCurrentRoundIdx(currentRoundIdx + 1);
+    if (currentRoundIdx < sessionRounds.length - 1) {
+      setCurrentRoundIdx(prev => prev + 1);
     }
   };
 
-  const isCompletedRound = (roundId: string) => {
-    return progress.games['sentence-builder'].completedRoundIds.includes(roundId);
-  };
-
-  const currentScoreForRound = progress.games['sentence-builder'].scoresByRound[round.id] || 0;
+  const currentConstructed = placedPieces.join(' ').normalize('NFC');
+  const isFinished = evaluationResult.status === 'success' && currentRoundIdx === sessionRounds.length - 1;
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6 pb-12 animate-in fade-in duration-200">
+    <div className="space-y-6 max-w-4xl mx-auto pb-12 animate-in fade-in duration-200">
+      {/* Toast Alert */}
+      {toastMessage && (
+        <div className="fixed top-20 right-6 z-50 p-4 bg-emerald-600 text-white rounded-2xl shadow-xl flex items-center gap-2 text-sm font-bold animate-in slide-in-from-top-4 duration-200">
+          <Sparkles className="w-5 h-5 text-amber-300 animate-spin" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
+
       {/* Top Header Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-4 bg-white p-4 sm:p-5 rounded-3xl border border-emerald-200/80 shadow-xs">
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-4 sm:p-5 rounded-3xl border border-emerald-200 shadow-xs">
         <div className="flex items-center gap-3">
           <button
             onClick={onBack}
-            className="p-2.5 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors cursor-pointer flex items-center gap-1.5 text-xs font-bold"
+            className="p-2.5 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors cursor-pointer"
+            title="Quay lại danh sách thử thách"
           >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Thử thách</span>
+            <ArrowLeft className="w-5 h-5" />
           </button>
           <div>
             <div className="flex items-center gap-2">
               <span className="text-xl">🌉</span>
-              <h1 className="font-heading font-extrabold text-lg sm:text-xl text-slate-800">
+              <h2 className="font-heading font-extrabold text-base sm:text-lg text-slate-800">
                 Xây Câu Thần Tốc
-              </h1>
-              <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold border border-emerald-300">
-                Vòng {round.roundNumber}/{SENTENCE_BUILDER_ROUNDS.length}
+              </h2>
+              <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                Lượt #{sessionCount}
               </span>
             </div>
-            <p className="text-xs text-slate-500 font-medium">
-              Chủ đề: {round.theme} • {round.title}
+            <p className="text-xs text-slate-500 hidden sm:block">
+              Sắp xếp các mảnh ghép thành câu văn chuẩn ngữ pháp, giàu hình ảnh
             </p>
           </div>
         </div>
 
-        {/* Current Round Score & Global Points */}
-        <div className="flex items-center gap-3">
-          <div className="text-right">
-            <span className="text-[11px] text-slate-500 block font-medium">Điểm trò chơi</span>
-            <span className="text-base font-extrabold text-emerald-600">
-              {progress.games['sentence-builder'].totalPoints} / 60 điểm
+        {/* Action buttons & Round Progress */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleSwapCurrentQuestion}
+            className="px-3 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 hover:text-emerald-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+            title="Đổi sang câu hỏi khác trong ngân hàng"
+          >
+            <Shuffle className="w-3.5 h-3.5 text-emerald-600" />
+            <span className="hidden sm:inline">Đổi câu khác</span>
+          </button>
+
+          <button
+            onClick={handleStartNewSession}
+            className="px-3 py-1.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+            title="Tạo lượt chơi mới với bộ câu hỏi ngẫu nhiên"
+          >
+            <RotateCcw className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Lượt mới</span>
+          </button>
+
+          <div className="px-3.5 py-1.5 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center gap-1.5">
+            <span className="text-xs font-bold text-emerald-800">
+              Vòng {currentRoundIdx + 1}/{sessionRounds.length}
             </span>
-          </div>
-          <div className="w-10 h-10 rounded-2xl bg-emerald-100 border border-emerald-300 flex items-center justify-center text-emerald-700 font-bold">
-            <Trophy className="w-5 h-5" />
           </div>
         </div>
       </div>
 
-      {/* Rounds Selector Pills */}
-      <div className="bg-emerald-50/60 p-2.5 sm:p-3 rounded-2xl border border-emerald-200 flex items-center gap-2 overflow-x-auto">
-        <span className="text-xs font-bold text-emerald-900 shrink-0 ml-1">
-          Chọn vòng:
-        </span>
-        {SENTENCE_BUILDER_ROUNDS.map((r, idx) => {
+      {/* Progress Pills */}
+      <div className="grid grid-cols-6 gap-2">
+        {sessionRounds.map((r, idx) => {
+          const isDone = progress.games['sentence-builder']?.completedRoundIds.includes(r.id);
           const isCurrent = idx === currentRoundIdx;
-          const completed = isCompletedRound(r.id);
-          const score = progress.games['sentence-builder'].scoresByRound[r.id] || 0;
-
           return (
-            <button
+            <div
               key={r.id}
-              onClick={() => setCurrentRoundIdx(idx)}
-              className={`px-3 py-1.5 rounded-xl font-bold text-xs transition-all flex items-center gap-1.5 shrink-0 cursor-pointer ${
-                isCurrent
-                  ? 'bg-emerald-600 text-white shadow-md shadow-emerald-500/20 scale-105'
-                  : completed
-                  ? 'bg-emerald-100 text-emerald-900 hover:bg-emerald-200 border border-emerald-300'
-                  : 'bg-white text-slate-600 hover:bg-emerald-50 border border-slate-200'
+              className={`h-2 rounded-full transition-all duration-300 ${
+                isCurrent 
+                  ? 'bg-emerald-500 ring-2 ring-emerald-300 ring-offset-1' 
+                  : isDone 
+                  ? 'bg-emerald-400' 
+                  : 'bg-slate-200'
               }`}
-            >
-              <span>Vòng {r.roundNumber}</span>
-              {completed && (
-                <span className="text-[10px] font-extrabold bg-emerald-700 text-emerald-100 px-1 rounded">
-                  {score}đ
-                </span>
-              )}
-            </button>
+            />
           );
         })}
       </div>
 
-      {/* Mission Card */}
-      <div className="bg-white rounded-3xl border border-emerald-200 shadow-sm p-6 sm:p-7 space-y-6">
-        {/* Mission Briefing */}
-        <div className="flex items-start justify-between gap-4 pb-4 border-b border-emerald-100">
-          <div>
-            <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-700 bg-emerald-100 px-2.5 py-1 rounded-md">
-              Nhiệm vụ vòng {round.roundNumber}
-            </span>
-            <h2 className="text-lg font-bold text-slate-800 mt-2">
-              Hãy ghép các mảnh từ bên dưới thành một câu văn hoàn chỉnh, giàu hình ảnh!
-            </h2>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Nhấn vào mảnh từ để đưa lên cầu hoặc nhấn lại vào mảnh trên cầu để đưa về giỏ.
-            </p>
+      {/* Main Game Card */}
+      <div className="bg-white rounded-3xl border border-emerald-200 p-6 sm:p-8 shadow-xs space-y-6">
+        {/* Round Header & Theme */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-emerald-700 bg-emerald-100 px-2.5 py-0.5 rounded-full">
+                {round.theme}
+              </span>
+              <span className="text-xs text-slate-400">• Câu hỏi #{round.id}</span>
+            </div>
+            <h3 className="font-heading font-bold text-lg text-slate-800">
+              {round.title}
+            </h3>
           </div>
 
-          {currentScoreForRound > 0 && (
-            <div className="shrink-0 bg-emerald-50 border border-emerald-300 px-3 py-1.5 rounded-xl text-center">
-              <span className="text-[10px] font-bold text-emerald-800 block">Đã đạt vòng này</span>
-              <span className="text-sm font-extrabold text-emerald-700">+{currentScoreForRound} điểm</span>
-            </div>
-          )}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                setShowHintModal(true);
+                setUsedHint(true);
+              }}
+              className="px-3 py-1.5 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <HelpCircle className="w-4 h-4 text-amber-600" />
+              <span>Gợi ý cô giáo</span>
+            </button>
+            <button
+              onClick={handleResetPieces}
+              className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 transition-colors cursor-pointer"
+              title="Xếp lại từ đầu"
+            >
+              <RotateCcw className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
-        {/* The Construction Zone (The Bridge) */}
+        {/* Sentence Construction Zone (Drop/Placed Area) */}
         <div className="space-y-2">
-          <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-            <span className="flex items-center gap-1.5 text-emerald-800">
-              <Layers className="w-4 h-4 text-emerald-600" />
-              <span>Cầu nối câu văn của em:</span>
-            </span>
-            {placedPieces.length > 0 && evaluationResult.status !== 'success' && (
-              <button
-                onClick={handleResetPieces}
-                className="text-slate-500 hover:text-rose-600 flex items-center gap-1 cursor-pointer transition-colors"
-                title="Làm lại từ đầu vòng này"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>Làm lại</span>
-              </button>
-            )}
-          </div>
+          <label className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+            <Layers className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Khu vực ghép câu hoàn chỉnh của em:</span>
+          </label>
 
-          <div className="min-h-[110px] p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-emerald-50/50 via-teal-50/40 to-emerald-50/50 border-2 border-dashed border-emerald-300 flex flex-wrap items-center gap-2.5 transition-all">
+          <div className={`min-h-[120px] p-5 rounded-2xl border-2 transition-all flex flex-wrap items-center gap-2.5 ${
+            evaluationResult.status === 'success'
+              ? 'bg-emerald-50/70 border-emerald-400'
+              : evaluationResult.status === 'incorrect'
+              ? 'bg-red-50/50 border-red-300'
+              : 'bg-slate-50 border-dashed border-slate-300'
+          }`}>
             {placedPieces.length === 0 ? (
               <div className="w-full text-center py-4 text-slate-400 text-xs italic">
-                Chạm vào các mảnh từ vựng bên dưới để xếp lên nhịp cầu này nhé...
+                👆 Hãy chạm vào các mảnh ghép bên dưới theo thứ tự đúng để tạo thành câu hoàn chỉnh...
               </div>
             ) : (
               placedPieces.map((piece, idx) => (
                 <button
-                  key={`placed-${idx}`}
+                  key={`${piece}-${idx}`}
                   onClick={() => handleReturnPiece(piece, idx)}
-                  disabled={evaluationResult.status === 'success'}
-                  className="px-4 py-2.5 rounded-xl bg-white text-emerald-950 font-bold text-sm sm:text-base border-2 border-emerald-400 shadow-sm hover:border-rose-400 hover:bg-rose-50 transition-all cursor-pointer flex items-center gap-1.5 group animate-in zoom-in-95 duration-150"
-                  title="Nhấn để gỡ mảnh này"
+                  className={`px-4 py-2.5 rounded-xl font-medium text-sm transition-all cursor-pointer shadow-xs active:scale-95 animate-in zoom-in-95 duration-100 ${
+                    evaluationResult.status === 'success'
+                      ? 'bg-emerald-600 text-white font-bold'
+                      : 'bg-emerald-700 text-white hover:bg-emerald-800'
+                  }`}
+                  title="Chạm để gỡ mảnh ghép này"
                 >
                   <span>{piece}</span>
-                  <span className="text-slate-300 group-hover:text-rose-500 text-xs font-normal">
-                    ✕
-                  </span>
                 </button>
               ))
             )}
           </div>
         </div>
 
-        {/* Word Bank / Pieces Pool */}
-        <div className="space-y-2">
-          <div className="text-xs font-bold text-slate-700">
-            <span>Các mảnh từ ngữ có sẵn:</span>
+        {/* Live Preview Sentence String */}
+        {placedPieces.length > 0 && (
+          <div className="p-3 bg-amber-50/60 rounded-xl border border-amber-200/80 text-xs text-slate-700 font-medium leading-relaxed">
+            <span className="font-bold text-amber-900">Xem trước câu: </span>
+            <span className="font-serif italic text-slate-900 font-semibold tracking-normal text-sm sm:text-base">"{currentConstructed.normalize('NFC')}"</span>
           </div>
+        )}
 
-          <div className="min-h-[80px] p-4 rounded-2xl bg-slate-50 border border-slate-200 flex flex-wrap items-center gap-2.5">
+        {/* Available Pieces Pool */}
+        <div className="space-y-2">
+          <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+            Các mảnh ghép từ ngữ (chạm để chọn):
+          </label>
+
+          <div className="p-5 rounded-2xl bg-slate-100/70 border border-slate-200 flex flex-wrap gap-2.5 min-h-[90px]">
             {availablePieces.length === 0 ? (
-              <div className="w-full text-center py-2 text-emerald-700 font-semibold text-xs flex items-center justify-center gap-1.5">
-                <CheckCircle2 className="w-4 h-4" />
-                <span>Em đã đưa hết tất cả mảnh lên cầu! Hãy bấm "Kiểm tra câu" nhé.</span>
+              <div className="w-full text-center py-2 text-slate-400 text-xs font-medium">
+                ✨ Em đã xếp hết các mảnh ghép! Bấm "Kiểm tra câu" bên dưới nhé.
               </div>
             ) : (
               availablePieces.map((piece, idx) => (
                 <button
-                  key={`available-${idx}`}
+                  key={`${piece}-${idx}`}
                   onClick={() => handlePlacePiece(piece, idx)}
-                  disabled={evaluationResult.status === 'success'}
-                  className="px-4 py-2.5 rounded-xl bg-white hover:bg-emerald-500 hover:text-white text-slate-800 font-bold text-sm sm:text-base border border-slate-300 hover:border-emerald-600 shadow-xs hover:shadow-md hover:-translate-y-0.5 transition-all cursor-pointer"
+                  className="px-4 py-2.5 rounded-xl bg-white hover:bg-emerald-50 active:bg-emerald-100 text-slate-800 font-semibold text-sm border-2 border-slate-200 hover:border-emerald-400 shadow-xs hover:shadow-sm transition-all cursor-pointer hover:-translate-y-0.5 active:translate-y-0"
                 >
                   {piece}
                 </button>
@@ -328,73 +388,54 @@ export const SentenceBuilderGame: React.FC<SentenceBuilderGameProps> = ({
           </div>
         </div>
 
-        {/* Evaluation Banner (Success or Retry) */}
+        {/* Evaluation Feedback Banner */}
         {evaluationResult.status === 'success' && (
-          <div className="p-5 rounded-2xl bg-emerald-50 border border-emerald-300 space-y-3 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-emerald-500 text-white flex items-center justify-center font-bold text-xl shrink-0 shadow-md">
-                ✓
-              </div>
-              <div>
-                <h4 className="font-heading font-extrabold text-base text-emerald-900">
-                  Chúc mừng em! Câu văn chuẩn xác và rất giàu cảm xúc!
-                </h4>
-                <p className="text-xs font-semibold text-emerald-700">
-                  {evaluationResult.pointsEarned! > 0
-                    ? `+${evaluationResult.pointsEarned} điểm tích lũy vào kho báu!`
-                    : evaluationResult.isDuplicate
-                    ? 'Em đã hoàn thành xuất sắc vòng này trước đó!'
-                    : 'Tuyệt vời!'}
+          <div className="p-5 rounded-2xl bg-emerald-50 border border-emerald-200 space-y-3 animate-in zoom-in-95 duration-200">
+            <div className="flex items-start gap-3">
+              <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <div className="font-bold text-sm text-emerald-900 flex items-center gap-2">
+                  <span>{evaluationResult.message}</span>
+                  {evaluationResult.pointsEarned ? (
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-200 text-emerald-900 text-xs font-extrabold">
+                      +{evaluationResult.pointsEarned} điểm
+                    </span>
+                  ) : null}
+                </div>
+                <p className="text-xs text-slate-700 leading-relaxed">
+                  {round.explanation}
                 </p>
+                <div className="text-[11px] text-emerald-800 bg-emerald-100/70 p-2.5 rounded-xl font-medium mt-2">
+                  💡 <strong>Góc ngữ pháp lớp 4:</strong> {round.grammaticalTip}
+                </div>
               </div>
-            </div>
-
-            <div className="text-xs text-slate-700 leading-relaxed bg-white/80 p-3.5 rounded-xl border border-emerald-200">
-              <p className="font-semibold text-emerald-950 mb-1">💡 Vì sao câu văn này đúng và hay:</p>
-              <p>{round.explanation}</p>
-              <p className="mt-1.5 text-emerald-800 font-medium italic">
-                {round.grammaticalTip}
-              </p>
             </div>
           </div>
         )}
 
         {evaluationResult.status === 'incorrect' && (
-          <div className="p-4 rounded-2xl bg-amber-50 border border-amber-300 flex items-start gap-3 animate-in fade-in duration-150">
-            <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-            <div className="text-xs text-amber-950 space-y-1">
-              <p className="font-bold text-amber-900">Chưa đúng trật tự câu:</p>
-              <p>{evaluationResult.message}</p>
+          <div className="p-4 rounded-2xl bg-red-50 border border-red-200 flex items-start gap-3 animate-in shake duration-200">
+            <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+            <div className="text-xs text-red-700 space-y-1">
+              <p className="font-bold">{evaluationResult.message}</p>
+              <p className="text-red-600">
+                Mẹo: Em có thể chạm vào mảnh ghép ở ô trên để gỡ ra hoặc bấm vào biểu tượng bóng đèn để xem gợi ý.
+              </p>
             </div>
           </div>
         )}
 
-        {/* Action Controls */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleUseHint}
-              className={`px-4 py-2.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
-                usedHint
-                  ? 'bg-amber-100 text-amber-900 border-amber-300'
-                  : 'bg-white hover:bg-amber-50 text-amber-800 border-amber-300'
-              }`}
-            >
-              <HelpCircle className="w-4 h-4 text-amber-600" />
-              <span>{usedHint ? 'Đã xem gợi ý (Tối đa 5đ)' : 'Gợi ý cô giáo'}</span>
-            </button>
-
-            <button
-              onClick={handleResetPieces}
-              disabled={evaluationResult.status === 'success'}
-              className="px-3.5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-colors cursor-pointer flex items-center gap-1 disabled:opacity-50"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>Xếp lại</span>
-            </button>
+        {/* Footer Actions */}
+        <div className="flex items-center justify-between pt-4 border-t border-slate-100 flex-wrap gap-3">
+          <div className="text-xs text-slate-500">
+            {usedHint ? (
+              <span className="text-amber-600 font-semibold">Đã dùng gợi ý (tối đa 5 điểm)</span>
+            ) : (
+              <span>Ghép đúng ngay: <strong>+10 điểm</strong></span>
+            )}
           </div>
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2">
             {evaluationResult.status !== 'success' ? (
               <button
                 onClick={handleCheckSentence}
@@ -405,22 +446,31 @@ export const SentenceBuilderGame: React.FC<SentenceBuilderGameProps> = ({
                 <span>Kiểm tra câu</span>
               </button>
             ) : (
-              currentRoundIdx < SENTENCE_BUILDER_ROUNDS.length - 1 ? (
+              currentRoundIdx < sessionRounds.length - 1 ? (
                 <button
                   onClick={handleNextRound}
                   className="px-6 py-2.5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-bold text-sm shadow-md hover:shadow-lg transition-all cursor-pointer flex items-center gap-2"
                 >
-                  <span>Qua Vòng {round.roundNumber + 1}</span>
+                  <span>Qua Vòng {currentRoundIdx + 2}</span>
                   <ChevronRight className="w-4 h-4" />
                 </button>
               ) : (
-                <button
-                  onClick={onBack}
-                  className="px-6 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm shadow-md cursor-pointer flex items-center gap-2"
-                >
-                  <Trophy className="w-4 h-4" />
-                  <span>Hoàn thành xuất sắc 6 Vòng!</span>
-                </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={handleStartNewSession}
+                    className="px-5 py-2.5 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-bold text-sm shadow-md hover:shadow-lg transition-all cursor-pointer flex items-center gap-2"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    <span>Chơi lượt mới với bộ câu hỏi khác</span>
+                  </button>
+                  <button
+                    onClick={onBack}
+                    className="px-5 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm shadow-md cursor-pointer flex items-center gap-2"
+                  >
+                    <Trophy className="w-4 h-4" />
+                    <span>Hoàn thành xuất sắc!</span>
+                  </button>
+                </div>
               )
             )}
           </div>
