@@ -1,0 +1,8 @@
+{
+  "name": " EDUNOVA Writing Coach – Viết hay hơn mỗi ngày!",
+  "description": "Nền tảng giáo dục thông minh EDUNOVA - Đổi mới cách học, bứt phá tri thức. Trợ lý AI luyện viết văn miêu tả và tập làm văn lớp 4, thử nghiệm tại Trường Tiểu học Kim Liên A.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
